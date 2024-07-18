@@ -1,6 +1,0 @@
-- agent=baku
-- suite=libero
-- dataloader=libero
-- suite/task=libero_10
-- suite.hidden_dim=256
-- bc_weight=/home/atharva/BAKU/baku/weights/libero/baku.pt
