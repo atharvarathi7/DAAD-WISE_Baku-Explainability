@@ -112,8 +112,8 @@ class RGBArrayAsObservationWrapper(dm_env.Environment):
         observation["proprioceptive"] = np.concatenate(
             [obs["robot0_joint_pos"], obs["robot0_gripper_qpos"]]
         )
-        print("############ Joint POS", obs["robot0_joint_pos"])
-        print("############ Gripper QPOS", obs["robot0_gripper_qpos"])
+        # print("############ Joint POS", obs["robot0_joint_pos"])
+        # print("############ Gripper QPOS", obs["robot0_gripper_qpos"])
         # get state
         observation["features"] = np.zeros(self._max_state_dim)
         state = self._env.get_sim_state()  # TODO: Change to robot state
@@ -483,4 +483,4 @@ def make(
                 for idx in idx2name:
                     f.write(f"{idx}: {idx2name[idx]}\n")
 
-    return envs, task_descriptions
+    return envs, task_descriptions, task_name

@@ -9,22 +9,25 @@ class DictionarySaver:
         # Ensure the directory exists
         if not os.path.exists(self.directory):
             os.makedirs(self.directory)
-        
+
+        filename = filename.replace(" ", "_")
+
         # Construct the full file path
         file_path = os.path.join(self.directory, filename)
         
         # Write the dictionary to the file
         with open(file_path, 'w') as file:
-            for i in dictionary:
-                file.write("----- New Episode--------")
-                for key, value in i.items():
+                for key, value in dictionary.items():
                     file.write(f"{key}: {value}\n")
 
     def save_as_pkl(self, filename, dictionary):
         # Ensure the directory exists
         if not os.path.exists(self.directory):
             os.makedirs(self.directory)
-        
+            
+        # get rid of whitepsaces
+        filename = filename.replace(" ", "_")
+
         # Construct the full file path
         file_path = os.path.join(self.directory, filename)
         

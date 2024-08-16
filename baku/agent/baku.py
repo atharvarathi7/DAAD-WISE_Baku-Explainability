@@ -39,7 +39,9 @@ class Actor(nn.Module):
         self._repr_dim = repr_dim
         self._act_dim = act_dim
         self._num_feat_per_step = num_feat_per_step
-
+        self._gradient_attn_maps =None
+        self._gradients_wrt_ft_token =None
+        self.attn_maps =None
         self._action_token = nn.Parameter(torch.randn(1, 1, 1, repr_dim))
 
         # GPT model
@@ -55,7 +57,6 @@ class Actor(nn.Module):
                     dropout=0.1,
                 )
             )
-            
         elif policy_type == "mlp":
             self._policy = nn.Sequential(
                 nn.Linear(repr_dim, hidden_dim),
@@ -122,6 +123,8 @@ class Actor(nn.Module):
             obs = obs.view(B, 1, T * D)
             features = self._policy(obs)
         elif self._policy_type == "gpt":
+            grad_attns=[]
+            gradients=[]
             # insert action token at each self._num_feat_per_step interval
             prompt = obs[:, :num_prompt_feats]
             obs = obs[:, num_prompt_feats:]
@@ -131,10 +134,29 @@ class Actor(nn.Module):
             obs = torch.cat([prompt, obs], dim=1)
 
             # get action features
-            features = self._policy(obs)
+            features, attns = self._policy(obs)#grad_attn here
+            self.attn_maps = attns
+
+            #import pdb; pdb.set_trace()
+
+            # print(features)
             features = features[:, num_prompt_feats:]
             num_feat_per_step = self._num_feat_per_step + 1  # +1 for action token
-            features = features[:, num_feat_per_step - 1 :: num_feat_per_step]
+            features = features[:, num_feat_per_step - 1 :: num_feat_per_step]  # just get action token
+        
+            # features are action token now
+
+            #Calculate gradients w.r.t action features
+            gradient = torch.tensor(features)
+            #self._policy.zero_grad()
+            
+            for i in range(8):
+                grad = torch.autograd.grad(features, attns[i], grad_outputs= gradient, retain_graph=True)[0].detach()
+                gradients.append(grad)
+                grad_attns.append(grad * attns[i].detach())
+                
+            self._gradient_attn_maps = grad_attns
+            self._gradients_wrt_ft_token = grad
 
         # action head
         pred_action = self._action_head(
@@ -144,7 +166,7 @@ class Actor(nn.Module):
         )
 
         if action is None:
-            return pred_action
+            return pred_action, attns
         else:
             loss = self._action_head.loss_fn(
                 pred_action,
@@ -669,7 +691,7 @@ class BCAgent:
             kwargs["cluster_centers"] = self._cluster_centers
 
         stddev = utils.schedule(self.stddev_schedule, global_step)
-        action = self.actor(features.unsqueeze(0), num_prompt_feats, stddev, **kwargs)
+        action, attns = self.actor(features.unsqueeze(0), num_prompt_feats, stddev, **kwargs) #pred_action sent here
 
         if self.policy_head == "bet":
             _, offset, base_action = action
@@ -685,6 +707,8 @@ class BCAgent:
                 action = action.sample()
 
         if self.temporal_agg:
+            grad_attns=[]
+            grads = []
             action = action.view(-1, self.num_queries, self._act_dim)
             self.all_time_actions[[step], step : step + self.num_queries] = action[-1:]
             actions_for_curr_step = self.all_time_actions[:, step]
@@ -695,13 +719,24 @@ class BCAgent:
             exp_weights = exp_weights / exp_weights.sum()
             exp_weights = torch.from_numpy(exp_weights).to(self.device).unsqueeze(dim=1)
             action = (actions_for_curr_step * exp_weights).sum(dim=0, keepdim=True)
+    
+            #Gradient of action wrt attn maps
+            gradient = torch.tensor(action)
+            self.actor._policy.zero_grad()
+            for i in range(8):
+                
+                grad = torch.autograd.grad(action, attns[i], grad_outputs= gradient, retain_graph=True)[0].detach()
+                grads.append(grad)
+                grad_attns.append(grad * attns[i].detach())
+                attns[i]=attns[i].detach().cpu().numpy()            
+    
             if norm_stats is not None:
-                return post_process(action.cpu().numpy()[0])
-            return action.cpu().numpy()[0]
+                return post_process(action.cpu().detach().numpy()[0]), grad_attns, grads
+            return action.cpu().detach().numpy()[0], grad_attns, grads
         else:
             if norm_stats is not None:
                 return post_process(action.cpu().numpy()[0, -1])
-            return action.cpu().numpy()[0, -1, :]
+            return action.cpu().detach().numpy()[0, -1, :]
 
     def update(self, expert_replay_iter, step, update=True):
         metrics = dict()

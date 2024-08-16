@@ -64,13 +64,14 @@ class WorkspaceIL:
             self.cfg.suite.task_make_fn.max_action_dim = (
                 self.expert_replay_loader.dataset._max_action_dim
             )
-        self.env, self.task_descriptions = hydra.utils.call(self.cfg.suite.task_make_fn)
 
+        self.env, self.task_descriptions, self.task = hydra.utils.call(self.cfg.suite.task_make_fn)
         # create agent
         self.agent = make_agent(
             self.env[0].observation_spec(), self.env[0].action_spec(), cfg
         )
-
+        self.agent_name = str(self.cfg.agent)
+        self.suite_name = self.cfg.suite.name
         self.envs_till_idx = len(self.env)
         self.expert_replay_loader.dataset.envs_till_idx = self.envs_till_idx
         self.expert_replay_iter = iter(self.expert_replay_loader)
@@ -104,13 +105,14 @@ class WorkspaceIL:
         self.agent.train(False)
         episode_rewards = []
         successes = []
-        images = []
-        frames=[]
         data_list=[]
-        #print("hello")
         attn_maps_across_layer = []
         observations = []
         actions=[]
+
+        # TODO: generate explainability data from different short-horizon Task!
+        # --> 10 short horizon task
+
         for env_idx in range(self.envs_till_idx):
             print(f"evaluating env {env_idx}")
             episode, total_reward = 0, 0
@@ -131,17 +133,44 @@ class WorkspaceIL:
                 if episode == 0:
                     self.video_recorder.init(self.env[env_idx], enabled=True)
 
-                # plot obs with cv2
-                # loop of one episode 
+
+                # datastorage per task / episode / run
+                data = {
+                    "prompt": None,
+                    "action": [],
+                    "pixels": [],
+                    "pixels_egocentric": [],
+                    "proprioceptive": [],
+                    "task_emb": None,
+                    "goal_achieved": [],
+                    "last_layer_atten_maps":[],
+                    "atten_maps": [],
+                    "grad_atten": [],
+                    "grad_atten_ft":[],
+                    "generic_atten_wrt_action_gradient":[],
+                    "action_gradient_weighted_tokens":[],
+                    "features_gradient_weighted_tokens":[],
+                    "gradients_wrt_action_features":[],
+                    "gradients_wrt_action":[],
+                    "environment": None,
+                    "agent":[],
+                    "suite":[],
+                    "task": [],
+                }
+                data["environment"] = self.task
+                data["task"] = self.task_descriptions[0]
+                data["agent"] = self.agent_name
+                data["suite"] = self.suite_name
+
+                # loop of episode!
                 # we want to explain what is going on here!
                 while not time_step.last():
-                    data = {}
                     if self.cfg.prompt == "intermediate_goal":
                         prompt = self.expert_replay_loader.dataset.sample_test(
                             env_idx, step
                         )
-                    with torch.no_grad(), utils.eval_mode(self.agent):
-                        action = self.agent.act(
+                    with utils.eval_mode(self.agent): #torch.no_grad was also here, Modified it to calculate gradients
+                        action, grad_attn_map, grad = self.agent.act(
                             time_step.observation,
                             prompt,
                             self.expert_replay_loader.dataset.stats,
@@ -153,44 +182,58 @@ class WorkspaceIL:
                     self.video_recorder.record(self.env[env_idx])
                     total_reward += time_step.reward
 
+
+                    # store data per timestep
+
+                    # TODO append data to list in data storage
+
+
                     #Observations
                     obs = time_step.observation
-                    observations.append(obs)
-                    data['Observation'] = obs
-                    actions.append(action)
-                    data['Action'] = action
-                    data['Prompt'] = prompt
+                    # language
+                    if data["prompt"] is None:
+                        data["prompt"] = prompt
+                        data["task_emb"] = obs["task_emb"]
+
+                    # import pdb; pdb.set_trace()
+                    data["action"].append(action)
+                    #data["features"].append(obs["features"])
+                    data["pixels"].append(obs["pixels"])
+                    data["pixels_egocentric"].append(obs["pixels_egocentric"])
+                    data["proprioceptive"].append(obs["proprioceptive"])
+                    data["goal_achieved"].append(obs["goal_achieved"])
+                    
                     step += 1
                     print(step)
 
-                    # save attention maps and other stuff here
-                    # TODO NEXT
+                    # EXTRACT DATA FROM MODEL AND ENV 
 
-                    # store observation itself
-                    # store the frame 
+                    # store attention maps and gradients 
+                    # TODO get gradients from action output
 
-                    #obs,reward,done,info = self.cfg.suite.libero.RGBArrayAsObbservationWrapper.step(action)
-                    
-                    #Agent_View Images
-                    img = self.env[env_idx].render_image
-                    frame = cv2.resize(img, (256, 256))
-                    data['Agent View'] = frame
-                    images.append(img)
+                    grad_attn_map_ft = self.agent.actor._gradient_attn_maps #Gradient Weighted Maps wrt Features
+                    gradients_wrt_action_features = self.agent.actor._gradients_wrt_ft_token
 
-                    #import pdb; pdb.set_trace()
-                    attn_maps=[] 
-                    for i in range(8):
-                        attn_map = self.agent.actor._policy.transformer.h[i].attn.last_attn_map
-                        attn_maps.append(attn_map)
+                    data["gradients_wrt_action_features"].append(gradients_wrt_action_features)
+                    data["gradients_wrt_action"].append(grad)
 
-                    data['attn_maps'] = attn_maps
-                    attn_maps_across_layer.append(attn_maps)  
-                    
-                    # import pdb; pdb.set_trace()
+                    attn_map = self.agent.actor.attn_maps
+                    data["atten_maps"].append(attn_map)
+
+                    attn_map = torch.tensor(attn_map[-1][-1]).mean(dim=0)
+                    attn_map = np.array(attn_map)
+                  
+                    # TODO just store gradients is fine!
+
+                    data["last_layer_atten_maps"].append(attn_map)#Code changed here to save only last layer maps taken mean across heads
+
+                    # make atten_maps to array and store it
+                    data["grad_atten"].append(grad_attn_map) #Gradient Weighted Maps wrt action token
+                    data["grad_atten_ft"].append(grad_attn_map_ft) #Gradient Weighted Maps wrt action feature token
+            
                     if self.cfg.suite.name == "calvin" and time_step.reward == 1:
                         self.agent.buffer_reset()
 
-                    data_list.append(data)
                 episode += 1
                 success.append(time_step.observation["goal_achieved"])
                 break 
@@ -201,34 +244,58 @@ class WorkspaceIL:
             break 
 
         print("finished")
-        #for key, value in observations[-1].items():
-            #print(f"{key}: {value}")
-        #import pdb; pdb.set_trace()
-        #print(observations[0])
-        #print(observations[1])
-        #print(observations[2])
-        #print(actions[-1])
-        #print(images[-1])
-        for img in images:
-            frame = cv2.resize(img, (256, 256))
-            frames.append(frame)
-        #cv2.imshow("Frame",frame)
-        #cv2.waitKey(0)
-        #print(len(attn_maps_across_layer))
-        #print(attn_maps_across_layer[-1])
         # TODO: store Explainability data and Obervations as pickle files
 
-        # store as dict
+        for i in range(len(data["grad_atten"])):
+            step_atten = data["grad_atten"][i]
+            R = torch.eye(5, 5).cuda()
+            R = R.unsqueeze(0).expand(1, 5, 5)
+            # check attention maps here!!
+            for j, blk in enumerate(step_atten):
+                cam = blk.detach()
+                cam = torch.abs(cam)
+                cam = cam.clamp(min=0).mean(dim=1)
+                R = R + torch.bmm(cam, R)
 
-        # data['observation'] = observations
-        # data['actions'] = actions
-        # data['attn_maps'] = attn_maps_across_layer
-        # data['images'] = frame
-        self.store_data.save_as_txt(filename='stored_data.txt', dictionary= data_list)
+                R[0]= R[0]- torch.eye(5,5).cuda()
+                sum = R[0].sum(dim=1)
+                for i in range(5):
+                  if sum[i] == 0:
+                       sum[i] = 1
+                  R[0][i] = R[0][i]/sum[i]
+                R[0] =  R[0] + torch.eye(5,5).cuda()
 
-        self.store_data.save_as_pkl(filename='stored_data.pkl', dictionary= data_list)
+            attention_relevance = R[0]/2  # batch dim
+          
+            attention_relevance = attention_relevance.cpu().numpy()
+            data["generic_atten_wrt_action_gradient"].append(attention_relevance)  
+            data["action_gradient_weighted_tokens"].append(attention_relevance[-1, :]) 
 
-        
+        for i in range(len(data["grad_atten_ft"])):
+            step_atten = data["grad_atten_ft"][i]
+            R = torch.eye(5, 5).cuda()
+            R = R.unsqueeze(0).expand(1, 5, 5)
+            # check attention maps here!!
+            for j, blk in enumerate(step_atten):
+                cam = blk.detach()
+                cam = torch.abs(cam)
+                cam = cam.clamp(min=0).mean(dim=1)
+                R = R + torch.bmm(cam, R)
+
+            attention_relevance = R[0]  # batch dim
+            attention_relevance = attention_relevance.cpu().numpy()    
+            data["features_gradient_weighted_tokens"].append(attention_relevance[-1, :])  
+
+        max_values = [t.max() for t in data["features_gradient_weighted_tokens"]]
+        overall_max_value = max(max_values)
+
+        for i in range(len(data["features_gradient_weighted_tokens"])):
+            data["features_gradient_weighted_tokens"][i] = data["features_gradient_weighted_tokens"][i]/overall_max_value
+
+        # generate pickle here
+        self.store_data.save_as_pkl(filename= f"data_{self.task}.pkl", dictionary=data)
+        self.store_data.save_as_txt(filename= f"data_{self.task}.txt", dictionary=data)
+
         for _ in range(len(self.env) - self.envs_till_idx):
             episode_rewards.append(0)
             successes.append(0)
@@ -244,66 +311,6 @@ class WorkspaceIL:
             log("step", self.global_step)
 
         self.agent.train(True)
-
-    # def eval(self):
-    #     self.agent.train(False)
-    #     episode_rewards = []
-    #     successes = []
-    #     for env_idx in range(self.envs_till_idx):
-    #         print(f"evaluating env {env_idx}")
-    #         episode, total_reward = 0, 0
-    #         eval_until_episode = utils.Until(self.cfg.suite.num_eval_episodes)
-    #         success = []
-
-    #         while eval_until_episode(episode):
-    #             time_step = self.env[env_idx].reset()
-    #             self.agent.buffer_reset()
-    #             step = 0
-
-
-    #             # prompt
-    #             if self.cfg.prompt != None and self.cfg.prompt != "intermediate_goal":
-    #                 prompt = self.expert_replay_loader.dataset.sample_test(env_idx)
-    #             else:
-    #                 prompt = None
-
-    #             if episode == 0:
-    #                 self.video_recorder.init(self.env[env_idx], enabled=True)
-
-    #             # plot obs with cv2
-    #             # loop of one episode 
-    #             # we want to explain what is going on here!
-    #             while not time_step.last():
-    #                 if self.cfg.prompt == "intermediate_goal":
-    #                     prompt = self.expert_replay_loader.dataset.sample_test(
-    #                         env_idx, step
-    #                     )
-    #                 with torch.no_grad(),h=nn.ModuleList([Block(config) for _ in range(config.n_layer)]),_trace()
-    #                 if self.cfg.suite.name == "calvin" and time_step.reward == 1:
-    #                     self.agent.buffer_reset()
-
-    #             episode += 1
-    #             success.append(time_step.observation["goal_achieved"])
-    #             import pdb; pdb.set_trace()
-    #         self.video_recorder.save(f"{self.global_frame}_env{env_idx}.mp4")
-    #         episode_rewards.append(total_reward / episode)
-    #         successes.append(np.mean(success))
-
-    #     for _ in range(len(self.env) - self.envs_till_idx):
-    #         episode_rewards.append(0)
-    #         successes.append(0)
-
-    #     with self.logger.log_and_dump_ctx(self.global_frame, ty="eval") as log:
-    #         for env_idx, reward in enumerate(episode_rewards):
-    #             log(f"episode_reward_env{env_idx}", reward)
-    #             log(f"success_env{env_idx}", successes[env_idx])
-    #         log("episode_reward", np.mean(episode_rewards[: self.envs_till_idx]))
-    #         log("success", np.mean(successes))
-    #         log("episode_length", step * self.cfg.suite.action_repeat / episode)
-    #         log("episode", self.global_episode)
-    #         log("step", self.global_step)
-
-    #     self.agent.train(True)
 
     def save_snapshot(self):
         snapshot = self.work_dir / "snapshot.pt"
@@ -348,9 +355,6 @@ def main(cfg):
     snapshots["bc"] = bc_snapshot
     # TODO: check what weights are getting loaded
     workspace.load_snapshot(snapshots)
-
-
-    # 
     workspace.eval_x()
     # workspace.eval()
 

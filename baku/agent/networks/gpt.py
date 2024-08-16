@@ -40,7 +40,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-
+import numpy as np
 
 # @torch.jit.script # good to enable when not using torch.compile, disable when using (our default)
 def new_gelu(x):
@@ -105,20 +105,27 @@ class CausalSelfAttention(nn.Module):
         # causal self-attention;
         x = new_gelu(x) 
         #Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
+
         att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
         att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float("-inf"))
         att = F.softmax(att, dim=-1)
-
-        self.last_attn_map = att
-
         att = self.attn_dropout(att)
-        y = att @ v  # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
+        self.last_attn_map = att
+        y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
         y = (
             y.transpose(1, 2).contiguous().view(B, T, C)
-        )  # re-assemble all head outputs side by side
+        )# re-assemble all head outputs side by side
 
-        # output projection
+        # output projection 
         y = self.resid_dropout(self.c_proj(y))
+        
+        # gradient = torch.tensor(y)
+        # grad = torch.autograd.grad(y, att, grad_outputs= gradient, retain_graph=True)[0].detach()
+
+        # grad_att = grad @ att
+        # print(grad_att)
+        #self.last_attn_map = grad_att
+        # print(grad)
         return y
 
 
@@ -169,14 +176,13 @@ class GPT(nn.Module):
         assert config.output_dim is not None
         assert config.block_size is not None
         self.config = config
-
+        self.num_layers = config.n_layer
         self.transformer = nn.ModuleDict(
             dict(
                 wte=nn.Linear(config.input_dim, config.n_embd),
                 wpe=nn.Embedding(config.block_size, config.n_embd),
                 drop=nn.Dropout(config.dropout),
                 h=nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
-                #self_attn=nn.ModuleList([CausalSelfAttention(config) for _ in range(config.n_layer)]),
                 ln_f=nn.LayerNorm(config.n_embd),
             )
         )
@@ -194,6 +200,9 @@ class GPT(nn.Module):
         print("number of parameters: %.2fM" % (n_params / 1e6,))
 
     def forward(self, input, targets=None):
+        grads=[]
+        attns=[]
+        grad_attns=[]
         device = input.device
         b, t, d = input.size()
         assert (
@@ -213,9 +222,18 @@ class GPT(nn.Module):
         x = self.transformer.drop(tok_emb + pos_emb)
         for block in self.transformer.h:
             x = block(x)
+            attns.append(block.attn.last_attn_map)
+
         x = self.transformer.ln_f(x)
-        logits = self.lm_head(x)
-        return logits
+        logits = self.lm_head(x)  # linear layer 
+
+        # gradient = torch.tensor(logits)
+        # for i in range(self.num_layers):
+        #     grad = torch.autograd.grad(logits, attns[i], grad_outputs= gradient, retain_graph=True)[0].detach()
+        #     grad_attns.append(grad * attns[i].detach())
+        #     attns[i]=attns[i].detach().cpu().numpy()
+
+        return logits, attns #grad_attns
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
